@@ -26,7 +26,7 @@ Let's start with a simple experiment.  We have this idea that a bigger sign-up l
 We already have a "metric":metrics.html we're monitoring, and our experiment will measure against it:
 
 <pre>
-ab_test "Big singup link" do
+ab_test "Big signup link" do
   description "Testing to see if a bigger sign-up link increases number of signups."
   metrics :signup
 end
@@ -75,7 +75,7 @@ Vanity splits the audience randomly -- using "cookies and other mechanisms":iden
 
 Vanity will show the conversion rate for each alternative, and how that conversion compares to the worst performing alternative.  In the example above, option A has 80.6% conversion rate, 11% more than option B's 72.6% conversion rate (72.6 * 111% ~ 80.6%). 
 
-(These large numbers are easily explained by the fact that this report was generated form made up data)
+(These large numbers are easily explained by the fact that this report was generated from made up data)
 
 It takes only a handful of visits before you'll see one alternative clearly performing better than all others.  That's a sign that you should continue running the experiment.  You see, small sample size tend to give out random results.
 

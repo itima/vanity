@@ -1,23 +1,27 @@
-require "test/test_helper"
+require "test_helper"
 
 class Sky < ActiveRecord::Base
-  connection.drop_table :skies if table_exists?
-  connection.create_table :skies do |t|
-    t.integer :height
-    t.timestamps
-  end
-
-  if defined?(Rails::Railtie)
-    scope :high, lambda { { :conditions=>"height >= 4" } }
-  else
-    named_scope :high, lambda { { :conditions=>"height >= 4" } }
-  end
+  scope :high, lambda { where("height >= 4") }
 end
 
+if ENV["DB"] == "active_record"
 
-context "ActiveRecord Metric" do
+describe Vanity::Metric::ActiveRecord do
 
-  test "record count" do
+  before do
+    Sky.connection.create_table(:skies) do |t|
+      t.integer :height
+      t.timestamps
+    end
+  end
+
+  after do
+    Sky.connection.drop_table(:skies) if Sky.connection.table_exists?(Sky.table_name)
+    Sky.reset_callbacks(:create)
+    Sky.reset_callbacks(:save)
+  end
+
+  it "record count" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -31,7 +35,7 @@ context "ActiveRecord Metric" do
     assert_equal 1, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "record sum" do
+  it "record sum" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -45,7 +49,7 @@ context "ActiveRecord Metric" do
     assert_equal 6, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "record average" do
+  it "record average" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -59,7 +63,7 @@ context "ActiveRecord Metric" do
     assert_equal 5, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "record minimum" do
+  it "record minimum" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -73,7 +77,7 @@ context "ActiveRecord Metric" do
     assert_equal 2, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "record maximum" do
+  it "record maximum" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -87,7 +91,7 @@ context "ActiveRecord Metric" do
     assert_equal 4, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "with conditions" do
+  it "with conditions" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -108,7 +112,7 @@ context "ActiveRecord Metric" do
     assert_equal 11, high_skies
   end
 
-  test "with scope" do
+  it "with scope" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -127,7 +131,7 @@ context "ActiveRecord Metric" do
     assert_equal 1, total
   end
 
-  test "with timestamp" do
+  it "with timestamp" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -141,7 +145,7 @@ context "ActiveRecord Metric" do
     assert_equal 1, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "with timestamp and table" do
+  it "with timestamp and table" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -155,7 +159,7 @@ context "ActiveRecord Metric" do
     assert_equal 1, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "hooks" do
+  it "hooks" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -174,7 +178,7 @@ context "ActiveRecord Metric" do
     assert_equal 4, total
   end
 
-  test "no hooks when metrics disabled" do
+  it "no hooks when metrics disabled" do
     not_collecting!
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
@@ -192,7 +196,7 @@ context "ActiveRecord Metric" do
     assert_equal 0, total
   end
 
-  test "after_create not after_save" do
+  it "after_create not after_save" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -210,25 +214,14 @@ context "ActiveRecord Metric" do
     Sky.last.update_attributes :height=>4
   end
 
-  test "with after_save" do
-    if rails3?
-      File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
-        f.write <<-RUBY
-          metric "Sky is limit" do
-            model Sky, :conditions=>["height > 3"]
-            Sky.after_save { |sky| track!(:sky_is_limit) if sky.height_changed? && sky.height > 3 }
-          end
-        RUBY
-      end
-    else
-      File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
-        f.write <<-RUBY
-          metric "Sky is limit" do
-            model Sky, :conditions=>["height > 3"]
-            Sky.after_save { |sky| track! if sky.height_changed? && sky.height > 3 }
-          end
-        RUBY
-      end
+  it "with after_save" do
+    File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
+      f.write <<-RUBY
+        metric "Sky is limit" do
+          model Sky, :conditions=>["height > 3"]
+          Sky.after_save { |sky| track!(:sky_is_limit) if sky.height_changed? && sky.height > 3 }
+        end
+      RUBY
     end
     Vanity.playground.metrics
     times = 0
@@ -242,25 +235,16 @@ context "ActiveRecord Metric" do
     assert_equal 2, times
   end
 
-  test "do it youself" do
-    if rails3?
-      File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
-        f.write <<-RUBY
-          metric "Sky is limit" do
-            Sky.after_save { |sky| track!(:sky_is_limit) if sky.height_changed? && sky.height > 3 }
-          end
-        RUBY
-      end
-    else
-      File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
-        f.write <<-RUBY
-          metric "Sky is limit" do
-            Sky.after_save { |sky| track! if sky.height_changed? && sky.height > 3 }
-          end
-        RUBY
-      end
+  it "do it yourself" do
+    File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
+      f.write <<-RUBY
+        metric "Sky is limit" do
+          Sky.after_save { |sky| track!(:sky_is_limit) if sky.height_changed? && sky.height > 3 }
+        end
+      RUBY
     end
     Vanity.playground.metrics
+    Sky.create!
     (1..5).each do |height|
       Sky.create! :height=>height
     end
@@ -268,7 +252,7 @@ context "ActiveRecord Metric" do
     assert_equal 3, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
 
-  test "last update for new metric" do
+  it "last update for new metric" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -279,7 +263,7 @@ context "ActiveRecord Metric" do
     assert_nil metric(:sky_is_limit).last_update_at
   end
 
-  test "last update with records" do
+  it "last update with records" do
     File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
       f.write <<-RUBY
         metric "Sky is limit" do
@@ -294,14 +278,19 @@ context "ActiveRecord Metric" do
     assert_in_delta metric(:sky_is_limit).last_update_at.to_i, (Time.now + 1.day).to_i, 1
   end
 
-  teardown do
-    Sky.delete_all
-    if rails3?
-      Sky.reset_callbacks(:create)
-      Sky.reset_callbacks(:save)
-    else
-      Sky.after_create.clear
-      Sky.after_save.clear
+  it "metric is specifiable with a string" do
+    File.open "tmp/experiments/metrics/sky_is_limit.rb", "w" do |f|
+      f.write <<-RUBY
+        metric "Sky is limit" do
+          model 'Sky'
+        end
+      RUBY
     end
+    Vanity.playground.metrics
+    Sky.create!
+    assert_equal 1, Vanity::Metric.data(metric(:sky_is_limit)).last.last
   end
+
+end
+
 end

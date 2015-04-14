@@ -13,25 +13,47 @@ module Vanity
       # Base model, stores connection and defines schema
       class VanityRecord < ActiveRecord::Base
         self.abstract_class = true
-      end
 
-      # Schema model
-      class VanitySchema < VanityRecord
-        self.table_name = :vanity_schema
+        def self.needs_attr_accessible?
+          respond_to?(:attr_accessible) && (!defined?(ActionController::StrongParameters) || defined?(ProtectedAttributes))
+        end
+
+        def self.rails_agnostic_find_or_create_by(method, value)
+          if respond_to? :find_or_create_by
+            find_or_create_by(method => value)
+          else
+            send :"find_or_create_by_#{method}", value
+          end
+        end
       end
 
       # Metric model
       class VanityMetric < VanityRecord
+        UPDATED_AT_GRACE_PERIOD = 1.minute
         self.table_name = :vanity_metrics
         has_many :vanity_metric_values
+        attr_accessible :metric_id if needs_attr_accessible?
 
         def self.retrieve(metric)
-          find_or_create_by_metric_id(metric.to_s)
+          rails_agnostic_find_or_create_by(:metric_id, metric.to_s)
+        end
+
+        def touch_with_grace_period
+          now = Time.now
+          self.updated_at = now if updated_before_grace_period?(now)
+        end
+
+        private
+
+        def updated_before_grace_period?(now)
+          now - updated_at >= UPDATED_AT_GRACE_PERIOD
         end
       end
 
       # Metric value
       class VanityMetricValue < VanityRecord
+        attr_accessible :date, :index, :value if needs_attr_accessible?
+
         self.table_name = :vanity_metric_values
         belongs_to :vanity_metric
       end
@@ -40,14 +62,15 @@ module Vanity
       class VanityExperiment < VanityRecord
         self.table_name = :vanity_experiments
         has_many :vanity_conversions, :dependent => :destroy
+        attr_accessible :experiment_id if needs_attr_accessible?
 
         # Finds or creates the experiment
         def self.retrieve(experiment)
-          find_or_create_by_experiment_id(experiment.to_s)
+          rails_agnostic_find_or_create_by(:experiment_id, experiment.to_s)
         end
 
         def increment_conversion(alternative, count = 1)
-          record = vanity_conversions.find_or_create_by_alternative(alternative)
+          record = vanity_conversions.rails_agnostic_find_or_create_by(:alternative, alternative)
           record.increment!(:conversions, count)
         end
       end
@@ -61,17 +84,17 @@ module Vanity
       # Participant model
       class VanityParticipant < VanityRecord
         self.table_name = :vanity_participants
+        attr_accessible :experiment_id, :identity, :seen, :shown, :converted if needs_attr_accessible?
 
-        # Finds the participant by experiment and identity. If
-        # create is true then it will create the participant
-        # if not found. If a hash is passed then this will be
-        # passed to create if creating, or will be used to
-        # update the found participant.
+        # Finds the participant by experiment and identity. If create is true
+        # then it will create the participant if not found. If a hash is
+        # passed then this will be passed to create if creating, or will be
+        # used to update the found participant.
         def self.retrieve(experiment, identity, create = true, update_with = nil)
-          if record = VanityParticipant.first(:conditions=>{ :experiment_id=>experiment.to_s, :identity=>identity.to_s })
+          if record = VanityParticipant.where(:experiment_id=>experiment.to_s, :identity=>identity.to_s).first
             record.update_attributes(update_with) if update_with
           elsif create
-            record = VanityParticipant.create({ :experiment_id=>experiment.to_s, :identity=>identity }.merge(update_with || {}))
+            record = VanityParticipant.create({ :experiment_id=>experiment.to_s, :identity=>identity.to_s }.merge(update_with || {}))
           end
           record
         end
@@ -86,7 +109,7 @@ module Vanity
       end
 
       def active?
-        VanityRecord.connected?
+        VanityRecord.connected? && VanityRecord.connection.active?
       end
 
       def disconnect!
@@ -103,6 +126,9 @@ module Vanity
         end
       end
 
+
+      # -- Metrics --
+
       def get_metric_last_update_at(metric)
         record = VanityMetric.find_by_metric_id(metric.to_s)
         record && record.updated_at
@@ -115,7 +141,7 @@ module Vanity
           record.vanity_metric_values.create(:date => timestamp.to_date.to_s, :index => index, :value => value)
         end
 
-        record.updated_at = Time.now
+        record.touch_with_grace_period
         record.save
       end
 
@@ -123,17 +149,12 @@ module Vanity
         connection = VanityMetric.connection
         record = VanityMetric.retrieve(metric)
         dates = (from.to_date..to.to_date).map(&:to_s)
-        conditions = [connection.quote_column_name('date') + ' IN (?)', dates]
+        conditions = [connection.quote_column_name('date') + ' BETWEEN ? AND ?', from.to_date, to.to_date]
         order = "#{connection.quote_column_name('date')}"
         select = "sum(#{connection.quote_column_name('value')}) AS value, #{connection.quote_column_name('date')}"
         group_by = "#{connection.quote_column_name('date')}"
 
-        values = record.vanity_metric_values.all(
-                :select => select,
-                :conditions => conditions,
-                :order => order,
-                :group => group_by
-        )
+        values = record.vanity_metric_values.select(select).where(conditions).group(group_by)
 
         dates.map do |date|
           value = values.detect{|v| v.date == date }
@@ -144,6 +165,13 @@ module Vanity
       def destroy_metric(metric)
         record = VanityMetric.find_by_metric_id(metric.to_s)
         record && record.destroy
+      end
+
+
+      # -- Experiments --
+
+      def experiment_persisted?(experiment)
+        VanityExperiment.find_by_experiment_id(experiment.to_s).present?
       end
 
       # Store when experiment was created (do not write over existing value).
@@ -178,14 +206,14 @@ module Vanity
       # :conversions.
       def ab_counts(experiment, alternative)
         record = VanityExperiment.retrieve(experiment)
-        participants = VanityParticipant.count(:conditions => {:experiment_id => experiment.to_s, :seen => alternative})
-        converted = VanityParticipant.count(:conditions => {:experiment_id => experiment.to_s, :converted => alternative})
-        conversions = record.vanity_conversions.sum(:conversions, :conditions => {:alternative => alternative})
+        participants = VanityParticipant.where(:experiment_id => experiment.to_s, :seen => alternative).count
+        converted = VanityParticipant.where(:experiment_id => experiment.to_s, :converted => alternative).count
+        conversions = record.vanity_conversions.where(:alternative => alternative).sum(:conversions)
 
         {
-                :participants => participants,
-                :converted => converted,
-                :conversions => conversions
+          :participants => participants,
+          :converted => converted,
+          :conversions => conversions
         }
       end
 
@@ -212,12 +240,25 @@ module Vanity
         VanityParticipant.retrieve(experiment, identity, true, :seen => alternative)
       end
 
+      # Determines if a participant already has seen this alternative in this experiment.
+      def ab_seen(experiment, identity, alternative)
+        participant = VanityParticipant.retrieve(experiment, identity, false)
+        participant && participant.seen == alternative.id
+      end
+
+      # Returns the participant's seen alternative in this experiment, if it exists
+      def ab_assigned(experiment, identity)
+        participant = VanityParticipant.retrieve(experiment, identity, false)
+        participant && participant.seen
+      end
+
       # Records a conversion in this experiment for the given alternative.
       # Associates a value with the conversion (default to 1). If implicit is
-      # true, add particpant if not already recorded for this experiment. If
-      # implicit is false (default), only add conversion is participant
+      # true, add participant if not already recorded for this experiment. If
+      # implicit is false (default), only add conversion if participant
       # previously recorded as participating in this experiment.
       def ab_add_conversion(experiment, alternative, identity, count = 1, implicit = false)
+        participant = VanityParticipant.retrieve(experiment, identity, false)
         VanityParticipant.retrieve(experiment, identity, implicit, :converted => alternative)
         VanityExperiment.retrieve(experiment).increment_conversion(alternative, count)
       end

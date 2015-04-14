@@ -7,6 +7,7 @@ Gem::Specification.new do |spec|
   spec.author         = "Assaf Arkin"
   spec.email          = "assaf@labnotes.org"
   spec.homepage       = "http://vanity.labnotes.org"
+  spec.license        = "MIT"
   spec.summary        = "Experience Driven Development framework for Ruby"
   spec.description    = "Mirror, mirror on the wall ..."
   spec.post_install_message = "To get started run vanity --help"
@@ -20,7 +21,10 @@ Gem::Specification.new do |spec|
   spec.rdoc_options     = "--title", "Vanity #{spec.version}", "--main", "README.rdoc",
                           "--webcvs", "http://github.com/assaf/#{spec.name}"
 
-  spec.required_ruby_version = '>= 1.8.7'
-  spec.add_dependency "redis", "~>2.0"
-  spec.add_dependency "redis-namespace", "~>1.0.0"
+  spec.required_ruby_version = ">= 1.9.3"
+
+  spec.add_runtime_dependency "i18n"
+
+  spec.add_development_dependency "bundler",  ">= 1.0.0"
+  spec.add_development_dependency "minitest", ">= 4.2"
 end

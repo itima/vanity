@@ -16,16 +16,16 @@ module Vanity
     # Vanity.playground.
     #
     # First argument is connection specification (see #redis=), last argument is
-    # a set of options, both are optional.  Supported options are:
+    # a set of options, both are optional. Supported options are:
     # - connection -- Connection specification
-    # - namespace -- Namespace to use
     # - load_path -- Path to load experiments/metrics from
     # - logger -- Logger to use
+    # - redis -- A Redis object that will be used for the connection
     def initialize(*args)
       options = Hash === args.last ? args.pop : {}
       # In the case of Rails, use the Rails logger and collect only for
       # production environment by default.
-      defaults = options[:rails] ? DEFAULTS.merge(:collecting => ::Rails.env.production?, :logger => ::Rails.logger) : DEFAULTS
+      defaults = options[:rails] ? DEFAULTS.merge(:collecting => true, :logger => ::Rails.logger) : DEFAULTS
       if config_file_exists?
         env = ENV["RACK_ENV"] || ENV["RAILS_ENV"] || "development"
         config = load_config_file[env]
@@ -39,33 +39,23 @@ module Vanity
       end
 
       @options = defaults.merge(config).merge(options)
-      if @options[:host] == 'redis' && @options.values_at(:host, :port, :db).any?
-        warn "Deprecated: please specify Redis connection as URL (\"redis://host:port/db\")"
-        establish_connection :adapter=>"redis", :host=>@options[:host], :port=>@options[:port], :database=>@options[:db] || @options[:database]
-      elsif @options[:redis]
-        @adapter = RedisAdapter.new(:redis=>@options[:redis])
-      else
-        connection_spec = args.shift || @options[:connection]
-        if connection_spec
-          connection_spec = "redis://" + connection_spec unless connection_spec[/^\w+:/]
-          establish_connection connection_spec
-        end
-      end
 
-      warn "Deprecated: namespace option no longer supported directly" if @options[:namespace]
       @load_path = @options[:load_path] || DEFAULTS[:load_path]
+
+      I18n.load_path += locale_file_paths
       unless @logger = @options[:logger]
         @logger = Logger.new(STDOUT)
         @logger.level = Logger::ERROR
       end
+
+      autoconnect(@options, args) if Vanity::Autoconnect.playground_should_autoconnect?
+
       @loading = []
       @use_js = false
+      @failover_on_datastore_error = false
       self.add_participant_path = DEFAULT_ADD_PARTICIPANT_PATH
       @collecting = !!@options[:collecting]
     end
-   
-    # Deprecated. Use redis.server instead.
-    attr_accessor :host, :port, :db, :password, :namespace
 
     # Path to load experiment files from.
     attr_accessor :load_path
@@ -73,54 +63,66 @@ module Vanity
     # Logger.
     attr_accessor :logger
 
-    # Path to the add_participant action, necessary if you have called use_js!
+    # Path to the add_participant action.
     attr_accessor :add_participant_path
 
-    # Defines a new experiment. Generally, do not call this directly,
-    # use one of the definition methods (ab_test, measure, etc).
-    #
-    # @see Vanity::Experiment
-    def define(name, type, options = {}, &block)
-      warn "Deprecated: if you need this functionality let's make a better API"
-      id = name.to_s.downcase.gsub(/\W/, "_").to_sym
-      raise "Experiment #{id} already defined once" if experiments[id]
-      klass = Experiment.const_get(type.to_s.gsub(/\/(.?)/) { "::#{$1.upcase}" }.gsub(/(?:^|_)(.)/) { $1.upcase })
-      experiment = klass.new(self, id, name, options)
-      experiment.instance_eval &block
-      experiment.save
-      experiments[id] = experiment
+    attr_accessor :on_datastore_error
+
+    attr_accessor :request_filter
+
+    # Path to custom templates (overriding those in the gem)
+    attr_writer :custom_templates_path
+    def custom_templates_path
+      @custom_templates_path ||= (File.expand_path(File.join(::Rails.root, 'app', 'views', 'vanity')) if defined?(::Rails))
     end
 
     # Returns the experiment. You may not have guessed, but this method raises
     # an exception if it cannot load the experiment's definition.
     #
     # @see Vanity::Experiment
-
     def experiment(name)
       id = name.to_s.downcase.gsub(/\W/, "_").to_sym
-      warn "Deprecated: pleae call experiment method with experiment identifier (a Ruby symbol)" unless id == name
+      warn "Deprecated: please call experiment method with experiment identifier (a Ruby symbol)" unless id == name
       experiments[id.to_sym] or raise NoExperimentError, "No experiment #{id}"
+    end
+
+
+    # -- Participant Information --
+
+    # Returns an array of all experiments this participant is involved in, with their assignment.
+    #  This is done as an array of arrays [[<experiment_1>, <assignment_1>], [<experiment_2>, <assignment_2>]], sorted by experiment name, so that it will give a consistent string
+    #  when converted to_s (so could be used for caching, for example)
+    def participant_info(participant_id)
+      participant_array = []
+      experiments.values.sort_by(&:name).each do |e|
+        index = connection.ab_assigned(e.id, participant_id)
+        if index
+          participant_array << [e, e.alternatives[index.to_i]]
+        end
+      end
+      participant_array
     end
 
 
     # -- Robot Detection --
 
-    # Call to indicate that participants should be added via js
-    # This helps keep robots from participating in the ab test
-    # and skewing results.
+    # Call to indicate that participants should be added via js. This helps
+    # keep robots from participating in the A/B test and skewing results.
     #
-    # If you use this, there are two more steps:
+    # If you want to use this:
+    # - Add <%= vanity_js %> to any page that needs uses an ab_test. vanity_js
+    #   needs to be included after your call to ab_test so that it knows which
+    #   version of the experiment the participant is a member of. The helper
+    #   will render nothing if the there are no ab_tests running on the current
+    #   page, so adding vanity_js to the bottom of your layouts is a good
+    #   option. Keep in mind that if you call use_js! and don't include
+    #   vanity_js in your view no participants will be recorded.
+    #
+    # Note that a custom JS callback path can be set using:
     # - Set Vanity.playground.add_participant_path = '/path/to/vanity/action',
     #   this should point to the add_participant path that is added with
     #   Vanity::Rails::Dashboard, make sure that this action is available
-    #   to all users
-    # - Add <%= vanity_js %> to any page that needs uses an ab_test. vanity_js
-    #   needs to be included after your call to ab_test so that it knows which
-    #   version of the experiment the participant is a member of.  The helper
-    #   will render nothing if the there are no ab_tests running on the current
-    #   page, so adding vanity_js to the bottom of your layouts is a good
-    #   option.  Keep in mind that if you call use_js! and don't include
-    #   vanity_js in your view no participants will be recorded.
+    #   to all users.
     def use_js!
       @use_js = true
     end
@@ -130,22 +132,109 @@ module Vanity
     end
 
 
-    # Returns hash of experiments (key is experiment id).
+    # -- Datastore graceful failover --
+
+    # Turns on passing of errors to the Proc returned by #on_datastore_error.
+    # Call Vanity.playground.failover_on_datastore_error! to turn this on.
+    #
+    # @since 1.9.0
+    def failover_on_datastore_error!
+      @failover_on_datastore_error = true
+    end
+
+    # Returns whether to failover on an error raise by the datastore adapter.
+    #
+    # @since 1.9.0
+    def failover_on_datastore_error?
+      @failover_on_datastore_error
+    end
+
+    # Must return a Proc that accepts as parameters: the thrown error, the
+    # calling Class, the calling method, and an array of arguments passed to
+    # the calling method. The return value is ignored.
+    #
+    #    Proc.new do |error, klass, method, arguments|
+    #      ...
+    #    end
+    #
+    # The default implementation logs this information to Playground#logger.
+    #
+    # Set a custom action by calling Vanity.playground.on_datastore_error =
+    # Proc.new { ... }.
+    #
+    # @since 1.9.0
+    def on_datastore_error
+      @on_datastore_error || default_on_datastore_error
+    end
+
+    def default_on_datastore_error # :nodoc:
+      Proc.new do |error, klass, method, arguments|
+        log = "[#{Time.now.iso8601}]"
+        log << " [vanity #{klass} #{method}]"
+        log << " [#{error.message}]"
+        log << " [#{arguments.join(' ')}]"
+        @logger.error(log)
+        nil
+      end
+    end
+    protected :default_on_datastore_error
+
+
+    # -- Blocking or ignoring visitors --
+
+    # Must return a Proc that accepts as a parameter the request object, if
+    # made available by the implement framework. The return value should be a
+    # boolean whether to ignore the request. This is called only for the JS
+    # callback action.
+    #
+    #    Proc.new do |request|
+    #      ...
+    #    end
+    #
+    # The default implementation does a simple test of whether the request's
+    # HTTP_USER_AGENT header contains a URI, since well behaved bots typically
+    # include a reference URI in their user agent strings. (Original idea:
+    # http://stackoverflow.com/a/9285889.)
+    #
+    # Alternatively, one could filter an explicit list of IPs, add additional
+    # user agent strings to filter, or any custom test. Set a custom filter
+    # by calling Vanity.playground.request_filter = Proc.new { ... }.
+    #
+    # @since 1.9.0
+    def request_filter
+      @request_filter || default_request_filter
+    end
+
+    def default_request_filter # :nodoc:
+      Proc.new do |request|
+        request &&
+          request.env &&
+          request.env["HTTP_USER_AGENT"] &&
+          request.env["HTTP_USER_AGENT"].match(/\(.*https?:\/\/.*\)/)
+      end
+    end
+    protected :default_request_filter
+
+    # Returns hash of experiments (key is experiment id). This create the
+    # Experiment and persists it to the datastore.
     #
     # @see Vanity::Experiment
     def experiments
-      unless @experiments
-        @experiments = {}
-        @logger.info "Vanity: loading experiments from #{load_path}"
-        Dir[File.join(load_path, "*.rb")].each do |file|
-          experiment = Experiment::Base.load(self, @loading, file)
-          experiment.save
-        end
+      return @experiments if @experiments
+
+      @experiments = {}
+      @logger.info "Vanity: loading experiments from #{load_path}"
+      Dir[File.join(load_path, "*.rb")].each do |file|
+        Experiment::Base.load(self, @loading, file)
       end
       @experiments
     end
 
-    # Reloads all metrics and experiments.  Rails calls this for each request in
+    def experiments_persisted?
+      experiments.keys.all? { |id| connection.experiment_persisted?(id) }
+    end
+
+    # Reloads all metrics and experiments. Rails calls this for each request in
     # development mode.
     def reload!
       @experiments = nil
@@ -153,7 +242,7 @@ module Vanity
       load!
     end
 
-    # Loads all metrics and experiments.  Rails calls this during
+    # Loads all metrics and experiments. Rails calls this during
     # initialization.
     def load!
       experiments
@@ -219,7 +308,7 @@ module Vanity
 
 
     # -- Connection management --
- 
+
     # This is the preferred way to programmatically create a new connection (or
     # switch to a new connection). If no connection was established, the
     # playground will create a new one by calling this method with no arguments.
@@ -242,7 +331,7 @@ module Vanity
     #   Vanity.playground.establish_connection :adapter=>:redis,
     #                                          :host=>"redis.local"
     #
-    # @since 1.4.0 
+    # @since 1.4.0
     def establish_connection(spec = nil)
       @spec = spec
       disconnect! if @adapter
@@ -287,6 +376,11 @@ module Vanity
       YAML.load(ERB.new(File.read(config_file_root + basename)).result)
     end
 
+    def locale_file_paths
+      locale_files_dir = File.expand_path('../../config/locales/', File.dirname(__FILE__))
+      Dir[locale_files_dir+'/*.{rb,yml}']
+    end
+
     # Returns the current connection. Establishes new connection is necessary.
     #
     # @since 1.4.0
@@ -315,32 +409,20 @@ module Vanity
       establish_connection(@spec)
     end
 
-    # Deprecated. Use Vanity.playground.collecting = true/false instead.  Under
-    # Rails, collecting is true in production environment, false in all other
-    # environments, which is exactly what you want.
-    def test!
-      warn "Deprecated: use collecting = false instead"
-      self.collecting = false
-    end
+    protected
 
-    # Deprecated. Use establish_connection or configuration file instead.
-    def redis=(spec_or_connection)
-      warn "Deprecated: use establish_connection method instead"
-      case spec_or_connection
-      when String
-        establish_connection "redis://" + spec_or_connection
-      when ::Redis
-        @connection = Adapters::RedisAdapter.new(spec_or_connection)
-      when :mock
-        establish_connection :adapter=>:mock
+    def autoconnect(options, arguments)
+      if options[:redis]
+        @adapter = RedisAdapter.new(:redis=>options[:redis])
       else
-        raise "I don't know what to do with #{spec_or_connection.inspect}"
+        connection_spec = arguments.shift || options[:connection]
+        if connection_spec
+          connection_spec = "redis://" + connection_spec unless connection_spec[/^\w+:/]
+          establish_connection connection_spec
+        else
+          establish_connection
+        end
       end
-    end
-
-    def redis
-      warn "Deprecated: use connection method instead"
-      connection
     end
 
   end
@@ -359,39 +441,18 @@ module Vanity
       @playground ||= Playground.new(:rails=>defined?(::Rails))
     end
 
-    # Returns the Vanity context.  For example, when using Rails this would be
+    # Returns the Vanity context. For example, when using Rails this would be
     # the current controller, which can be used to get/set the vanity identity.
     def context
       Thread.current[:vanity_context]
     end
 
-    # Sets the Vanity context.  For example, when using Rails this would be
+    # Sets the Vanity context. For example, when using Rails this would be
     # set by the set_vanity_context before filter (via Vanity::Rails#use_vanity).
     def context=(context)
       Thread.current[:vanity_context] = context
     end
 
-    # Path to template.
-    def template(name)
-      path = File.join(File.dirname(__FILE__), "templates/#{name}")
-      path << ".erb" unless name["."]
-      path
-    end
-  end
-end
 
-
-class Object
-
-  # Use this method to access an experiment by name.
-  #
-  # @example
-  #   puts experiment(:text_size).alternatives
-  #
-  # @see Vanity::Playground#experiment
-  # @deprecated
-  def experiment(name)
-    warn "Deprecated. Please call Vanity.playground.experiment directly."
-    Vanity.playground.experiment(name)
   end
 end

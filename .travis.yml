@@ -1,15 +1,31 @@
+sudo: false
+cache: bundler
 language: ruby
 bundler_args: --without development
-script: 'rake appraisal test'
+script: 'bundle exec rake test'
+services:
+  - mongodb
+  - redis-server
 rvm:
-- 1.8.7
 - 1.9.3
+- 2.0.0
+- 2.1.0
+- 2.2.0
+- ruby-head
 env:
 - DB=mongodb
 - DB=redis
-- DB=mysql
-#- DB=postgres
+- DB=active_record
+gemfile:
+  - gemfiles/rails32.gemfile
+  - gemfiles/rails4.gemfile
+  - gemfiles/rails41.gemfile
+  - gemfiles/rails42.gemfile
 before_script:
-- "mysql -e 'create database vanity_test;' >/dev/null"
-- "rake appraisal:install"
-#- "psql -c 'create database vanity_test;' -U postgres >/dev/null"
+- 'echo ''gem: --no-ri --no-rdoc'' > ~/.gemrc' # skip installing docs for gems
+matrix:
+  exclude:
+    - rvm: 2.2.0
+      gemfile: gemfiles/rails32.gemfile
+  allow_failures:
+    - rvm: ruby-head

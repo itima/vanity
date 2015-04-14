@@ -1,4 +1,4 @@
-module Vanity  
+module Vanity
   # Helper methods available on Object.
   #
   # @example From ERB template
@@ -17,7 +17,7 @@ module Vanity
   #     end
   #   end
   module Helpers
-    
+
     # This method returns one of the alternative values in the named A/B test.
     #
     # @example A/B two alternatives for a page
@@ -34,12 +34,12 @@ module Vanity
     #   end
     # @since 1.2.0
     def ab_test(name, &block)
+      # TODO refactor with Vanity::Rails::Helpers#ab_test
+      request = respond_to?(:request) ? self.request : nil
       if Vanity.playground.using_js?
-        @_vanity_experiments ||= {}
-        @_vanity_experiments[name] ||= Vanity.playground.experiment(name).choose
-        value = @_vanity_experiments[name].value
+        value = Vanity.context.vanity_store_experiment_for_js name, Vanity.playground.experiment(name).choose(request)
       else
-        value = Vanity.playground.experiment(name).choose.value
+        value = Vanity.playground.experiment(name).choose(request).value
       end
 
       if block
@@ -50,13 +50,21 @@ module Vanity
       end
     end
 
-    # Tracks an action associated with a metric.
+    # Tracks an action associated with a metric. Useful for calling from a
+    # Rack handler. Note that a user should already be added to an experiment
+    # via #ab_test before this is called - otherwise, the conversion will be
+    # tracked, but the user will not be added to the experiment.
     #
     # @example
     #   track! :invitation
+    # @example
+    #   track! :click, { :identity=>Identity.new(env['rack.session']), :values=>[1] }
+    #
+    # @param count_or_options Defaults to a count of 1. Also accepts a hash
+    #   of options passed (eventually) to AbTest#track!.
     # @since 1.2.0
-    def track!(name, count = 1)
-      Vanity.playground.track! name, count
+    def track!(name, count_or_options = 1)
+      Vanity.playground.track! name, count_or_options
     end
   end
 end

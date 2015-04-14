@@ -12,7 +12,7 @@ class VanityMigration < ActiveRecord::Migration
       t.integer :value
       t.string :date
     end
-    add_index :vanity_metric_values, [:vanity_metric_id]
+    add_index :vanity_metric_values, [:vanity_metric_id, :date]
 
     create_table :vanity_experiments do |t|
       t.string :experiment_id
@@ -35,6 +35,7 @@ class VanityMigration < ActiveRecord::Migration
       t.integer :shown
       t.integer :seen
       t.integer :converted
+      t.timestamps
     end
     add_index :vanity_participants, [:experiment_id]
     add_index :vanity_participants, [:experiment_id, :identity], :name => "by_experiment_id_and_identity"

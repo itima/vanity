@@ -1,119 +1,35 @@
 require "digest/md5"
+require "vanity/experiment/alternative"
+require "vanity/experiment/bayesian_bandit_score"
 
 module Vanity
   module Experiment
+    # The meat.
+    class AbTest < Base
+      class << self
+        # Convert z-score to probability.
+        def probability(score)
+          score = score.abs
+          probability = AbTest::Z_TO_PROBABILITY.find { |z,p| score >= z }
+          probability ? probability.last : 0
+        end
 
-    # One of several alternatives in an A/B test (see AbTest#alternatives).
-    class Alternative
-
-      def initialize(experiment, id, value) #, participants, converted, conversions)
-        @experiment = experiment
-        @id = id
-        @name = "option #{(@id + 65).chr}"
-        @value = value
-      end
-
-      # Alternative id, only unique for this experiment.
-      attr_reader :id
-     
-      # Alternative name (option A, option B, etc).
-      attr_reader :name
-
-      # Alternative value.
-      attr_reader :value
-
-      # Experiment this alternative belongs to.
-      attr_reader :experiment
-
-      # Number of participants who viewed this alternative.
-      def participants
-        load_counts unless @participants
-        @participants
-      end
-
-      # Number of participants who converted on this alternative (a participant is counted only once).
-      def converted
-        load_counts unless @converted
-        @converted
-      end
-
-      # Number of conversions for this alternative (same participant may be counted more than once).
-      def conversions
-        load_counts unless @conversions
-        @conversions
-      end
-
-      # Z-score for this alternative, related to 2nd-best performing alternative. Populated by AbTest#score.
-      attr_accessor :z_score
-
-      # Probability derived from z-score. Populated by AbTest#score.
-      attr_accessor :probability
-    
-      # Difference from least performing alternative. Populated by AbTest#score.
-      attr_accessor :difference
-
-      # Conversion rate calculated as converted/participants
-      def conversion_rate
-        @conversion_rate ||= (participants > 0 ? converted.to_f/participants.to_f  : 0.0)
-      end
-
-      # The measure we use to order (sort) alternatives and decide which one is better (by calculating z-score).
-      # Defaults to conversion rate.
-      def measure
-        conversion_rate
-      end
-
-      def <=>(other)
-        measure <=> other.measure 
-      end
-
-      def ==(other)
-        other && id == other.id && experiment == other.experiment
-      end
-
-      def to_s
-        name
-      end
-
-      def inspect
-        "#{name}: #{value} #{converted}/#{participants}"
-      end
-
-      def load_counts
-        if @experiment.playground.collecting?
-          @participants, @converted, @conversions = @experiment.playground.connection.ab_counts(@experiment.id, id).values_at(:participants, :converted, :conversions)
-        else
-          @participants = @converted = @conversions = 0
+        def friendly_name
+          "A/B Test"
         end
       end
-    end
 
-
-      # The meat.
-      class AbTest < Base
-        class << self
-
-          # Convert z-score to probability.
-          def probability(score)
-            score = score.abs
-            probability = AbTest::Z_TO_PROBABILITY.find { |z,p| score >= z }
-            probability ? probability.last : 0
-          end
-
-          def friendly_name
-            "A/B Test" 
-          end
-
-        end
+      DEFAULT_SCORE_METHOD = :z_score
 
       def initialize(*args)
         super
+        @score_method = DEFAULT_SCORE_METHOD
+        @use_probabilities = nil
       end
 
-
       # -- Metric --
-    
-      # Tells A/B test which metric we're measuring, or returns metric in use. 
+
+      # Tells A/B test which metric we're measuring, or returns metric in use.
       #
       # @example Define A/B test against coolness metric
       #   ab_test "Background color" do
@@ -127,11 +43,10 @@ module Vanity
         @metrics
       end
 
-
       # -- Alternatives --
 
       # Call this method once to set alternative values for this experiment
-      # (requires at least two values).  Call without arguments to obtain
+      # (requires at least two values). Call without arguments to obtain
       # current list of alternatives.
       #
       # @example Define A/B test with three alternatives
@@ -139,7 +54,7 @@ module Vanity
       #     metrics :coolness
       #     alternatives "red", "blue", "orange"
       #   end
-      # 
+      #
       # @example Find out which alternatives this test uses
       #   alts = experiment(:background_color).alternatives
       #   puts "#{alts.count} alternatives, with the colors: #{alts.map(&:value).join(", ")}"
@@ -169,13 +84,30 @@ module Vanity
         alternatives.find { |alt| alt.value == value }
       end
 
-      # Defines an A/B test with two alternatives: false and true.  This is the
+      # What method to use for calculating score. Default is :ab_test, but can
+      # also be set to :bayes_bandit_score to calculate probability of each
+      # alternative being the best.
+      #
+      # @example Define A/B test which uses bayes_bandit_score in reporting
+      # ab_test "noodle_test" do
+      #   alternatives "spaghetti", "linguine"
+      #   metrics :signup
+      #   score_method :bayes_bandit_score
+      # end
+      def score_method(method=nil)
+        if method
+          @score_method = method
+        end
+        @score_method
+      end
+
+      # Defines an A/B test with two alternatives: false and true. This is the
       # default pair of alternatives, so just syntactic sugar for those who love
       # being explicit.
       #
       # @example
       #   ab_test "More bacon" do
-      #     metrics :yummyness 
+      #     metrics :yummyness
       #     false_true
       #   end
       #
@@ -184,27 +116,31 @@ module Vanity
       end
       alias true_false false_true
 
-      # Chooses a value for this experiment.  You probably want to use the
+      # Returns fingerprint (hash) for given alternative. Can be used to lookup
+      # alternative for experiment without revealing what values are available
+      # (e.g. choosing alternative from HTTP query parameter).
+      def fingerprint(alternative)
+        Digest::MD5.hexdigest("#{id}:#{alternative.id}")[-10,10]
+      end
+
+      # Chooses a value for this experiment. You probably want to use the
       # Rails helper method ab_test instead.
       #
       # This method picks an alternative for the current identity and returns
-      # the alternative's value.  It will consistently choose the same
+      # the alternative's value. It will consistently choose the same
       # alternative for the same identity, and randomly split alternatives
       # between different identities.
       #
       # @example
       #   color = experiment(:which_blue).choose
-      def choose
+      def choose(request=nil)
         if @playground.collecting?
           if active?
             identity = identity()
             index = connection.ab_showing(@id, identity)
             unless index
-              index = alternative_for(identity)
-              if !@playground.using_js?
-                connection.ab_add_participant @id, index, identity
-                check_completion!
-              end
+              index = alternative_for(identity).to_i
+              save_assignment_if_valid_visitor(identity, index, request) unless @playground.using_js?
             end
           else
             index = connection.ab_get_outcome(@id) || alternative_for(identity)
@@ -218,22 +154,17 @@ module Vanity
         alternatives[index.to_i]
       end
 
-      # Returns fingerprint (hash) for given alternative.  Can be used to lookup
-      # alternative for experiment without revealing what values are available
-      # (e.g. choosing alternative from HTTP query parameter).
-      def fingerprint(alternative)
-        Digest::MD5.hexdigest("#{id}:#{alternative.id}")[-10,10]
-      end
 
-      
-      # -- Testing --
-     
-      # Forces this experiment to use a particular alternative.  You'll want to
-      # use this from your test cases to test for the different alternatives.
+      # -- Testing and JS Callback --
+
+      # Forces this experiment to use a particular alternative. This may be
+      # used in test cases to force a specific alternative to obtain a
+      # deterministic test. This method also is used in the add_participant
+      # callback action when adding participants via vanity_js.
       #
       # @example Setup test to red button
       #   setup do
-      #     experiment(:button_color).select(:red)
+      #     experiment(:button_color).chooses(:red)
       #   end
       #
       #   def test_shows_red_button
@@ -242,23 +173,20 @@ module Vanity
       #
       # @example Use nil to clear selection
       #   teardown do
-      #     experiment(:green_button).select(nil)
+      #     experiment(:green_button).chooses(nil)
       #   end
-      def chooses(value)
+      def chooses(value, request=nil)
         if @playground.collecting?
           if value.nil?
             connection.ab_not_showing @id, identity
           else
             index = @alternatives.index(value)
-            #add them to the experiment unless they are already in it
-            unless index == connection.ab_showing(@id, identity)
-              connection.ab_add_participant @id, index, identity
-              check_completion!
-            end
+            save_assignment_if_valid_visitor(identity, index, request)
+
             raise ArgumentError, "No alternative #{value.inspect} for #{name}" unless index
-            if (connection.ab_showing(@id, identity) && connection.ab_showing(@id, identity) != index) || 
-         alternative_for(identity) != index
-              connection.ab_show @id, identity, index
+            if (connection.ab_showing(@id, identity) && connection.ab_showing(@id, identity) != index) ||
+              alternative_for(identity) != index
+              connection.ab_show(@id, identity, index)
             end
           end
         else
@@ -282,19 +210,27 @@ module Vanity
 
       # -- Reporting --
 
-      # Scores alternatives based on the current tracking data.  This method
+      def calculate_score
+        if respond_to?(score_method)
+          self.send(score_method)
+        else
+          score
+        end
+      end
+
+      # Scores alternatives based on the current tracking data. This method
       # returns a structure with the following attributes:
       # [:alts]   Ordered list of alternatives, populated with scoring info.
       # [:base]   Second best performing alternative.
       # [:least]  Least performing alternative (but more than zero conversion).
-      # [:choice] Choice alterntive, either the outcome or best alternative.
+      # [:choice] Choice alternative, either the outcome or best alternative.
       #
       # Alternatives returned by this method are populated with the following
       # attributes:
       # [:z_score]      Z-score (relative to the base alternative).
       # [:probability]  Probability (z-score mapped to 0, 90, 95, 99 or 99.9%).
       # [:difference]   Difference from the least performant altenative.
-      # 
+      #
       # The choice alternative is set only if its probability is higher or
       # equal to the specified probability (default is 90%).
       def score(probability = 90)
@@ -323,18 +259,56 @@ module Vanity
         # choice alternative can only pick best if we have high probability (>90%).
         best = sorted.last if sorted.last.measure > 0.0
         choice = outcome ? alts[outcome.id] : (best && best.probability >= probability ? best : nil)
-        Struct.new(:alts, :best, :base, :least, :choice).new(alts, best, base, least, choice)
+        Struct.new(:alts, :best, :base, :least, :choice, :method).new(alts, best, base, least, choice, :score)
       end
 
-      # Use the result of #score to derive a conclusion.  Returns an
+      # Scores alternatives based on the current tracking data, using Bayesian
+      # estimates of the best binomial bandit. Based on the R bandit package,
+      # http://cran.r-project.org/web/packages/bandit, which is based on
+      # Steven L. Scott, A modern Bayesian look at the multi-armed bandit,
+      # Appl. Stochastic Models Bus. Ind. 2010; 26:639-658.
+      # (http://www.economics.uci.edu/~ivan/asmb.874.pdf)
+      #
+      # This method returns a structure with the following attributes:
+      # [:alts]   Ordered list of alternatives, populated with scoring info.
+      # [:base]   Second best performing alternative.
+      # [:least]  Least performing alternative (but more than zero conversion).
+      # [:choice] Choice alternative, either the outcome or best alternative.
+      #
+      # Alternatives returned by this method are populated with the following
+      # attributes:
+      # [:probability]  Probability (probability this is the best alternative).
+      # [:difference]   Difference from the least performant altenative.
+      #
+      # The choice alternative is set only if its probability is higher or
+      # equal to the specified probability (default is 90%).
+      def bayes_bandit_score(probability = 90)
+        begin
+          require "backports/1.9.1/kernel/define_singleton_method" if RUBY_VERSION < "1.9"
+          require "integration"
+          require "rubystats"
+        rescue LoadError
+          fail "to use bayes_bandit_score, install integration and rubystats gems"
+        end
+
+        begin
+          require "gsl"
+        rescue LoadError
+          warn "for better integration performance, install gsl gem"
+        end
+
+        BayesianBanditScore.new(alternatives, outcome).calculate!
+      end
+
+      # Use the result of #score or #bayes_bandit_score to derive a conclusion. Returns an
       # array of claims.
-      def conclusion(score = score)
+      def conclusion(score = score())
         claims = []
         participants = score.alts.inject(0) { |t,alt| t + alt.participants }
-        claims << case participants
-          when 0 ; "There are no participants in this experiment yet."
-          when 1 ; "There is one participant in this experiment."
-          else ; "There are #{participants} participants in this experiment."
+        claims << if participants.zero?
+          I18n.t('vanity.no_participants')
+        else
+          I18n.t('vanity.experiment_participants', :count=>participants)
         end
         # only interested in sorted alternatives with conversion
         sorted = score.alts.select { |alt| alt.measure > 0.0 }.sort_by(&:measure).reverse
@@ -346,36 +320,81 @@ module Vanity
           best, second = sorted[0], sorted[1]
           if best.measure > second.measure
             diff = ((best.measure - second.measure) / second.measure * 100).round
-            better = " (%d%% better than %s)" % [diff, second.name] if diff > 0
-            claims << "The best choice is %s: it converted at %.1f%%%s." % [best.name, best.measure * 100, better]
-            if best.probability >= 90
-              claims << "With %d%% probability this result is statistically significant." % score.best.probability
+            better = I18n.t('vanity.better_alternative_than', :probability=>diff.to_i, :alternative=> second.name) if diff > 0
+            claims << I18n.t('vanity.best_alternative_measure', :best_alternative=>best.name, :measure=>'%.1f' % (best.measure * 100), :better_than=>better)
+            if score.method == :bayes_bandit_score
+              if best.probability >= 90
+                claims << I18n.t('vanity.best_alternative_probability', :probability=>score.best.probability.to_i)
+              else
+                claims << I18n.t('vanity.low_result_confidence')
+              end
             else
-              claims << "This result is not statistically significant, suggest you continue this experiment."
+              if best.probability >= 90
+                claims << I18n.t('vanity.best_alternative_is_significant', :probability=>score.best.probability.to_i)
+              else
+                claims << I18n.t('vanity.result_isnt_significant')
+              end
             end
             sorted.delete best
           end
           sorted.each do |alt|
             if alt.measure > 0.0
-              claims << "%s converted at %.1f%%." % [alt.name.gsub(/^o/, "O"), alt.measure * 100]
+              claims << I18n.t('vanity.converted_percentage', :alternative=>alt.name.sub(/^\w/, &:upcase), :percentage=>'%.1f' % (alt.measure * 100))
             else
-              claims << "%s did not convert." % alt.name.gsub(/^o/, "O")
+              claims << I18n.t('vanity.didnt_convert', :alternative=>alt.name.sub(/^\w/, &:upcase))
             end
           end
         else
-          claims << "This experiment did not run long enough to find a clear winner."
+          claims << I18n.t('vanity.no_clear_winner')
         end
-        claims << "#{score.choice.name.gsub(/^o/, "O")} selected as the best alternative." if score.choice
+        claims << I18n.t('vanity.selected_as_best', :alternative=>score.choice.name.sub(/^\w/, &:upcase)) if score.choice
         claims
       end
 
+      # -- Unequal probability assignments --
+
+      def set_alternative_probabilities(alternative_probabilities)
+        # create @use_probabilities as a function to go from [0,1] to outcome
+        cumulative_probability = 0.0
+        new_probabilities = alternative_probabilities.map {|am| [am, (cumulative_probability += am.probability)/100.0]}
+        @use_probabilities = new_probabilities
+      end
+
+      # -- Experiment rebalancing --
+
+      # Experiment rebalancing allows the app to automatically adjust the probabilities for each alternative; when one is performing better, it will increase its probability
+      #  according to Bayesian one-armed bandit theory, in order to (eventually) maximize your overall conversions.
+
+      # Sets or returns how often (as a function of number of people assigned) to rebalance. For example:
+      #   ab_test "Simple" do
+      #     rebalance_frequency 100
+      #   end
+      #
+      #  puts "The experiment will automatically rebalance after every " + experiment(:simple).description + " users are assigned."
+      def rebalance_frequency(rf = nil)
+        if rf
+          @assignments_since_rebalancing = 0
+          @rebalance_frequency = rf
+          rebalance!
+        end
+        @rebalance_frequency
+      end
+
+      # Force experiment to rebalance.
+      def rebalance!
+        return unless @playground.collecting?
+        score_results = bayes_bandit_score
+        if score_results.method == :bayes_bandit_score
+          set_alternative_probabilities score_results.alts
+        end
+      end
 
       # -- Completion --
 
       # Defines how the experiment can choose the optimal outcome on completion.
       #
       # By default, Vanity will take the best alternative (highest conversion
-      # rate) and use that as the outcome.  You experiment may have different
+      # rate) and use that as the outcome. You experiment may have different
       # needs, maybe you want the least performing alternative, or factor cost
       # in the equation?
       #
@@ -398,30 +417,41 @@ module Vanity
         outcome && _alternatives[outcome]
       end
 
-      def complete!
+      def complete!(outcome = nil)
         return unless @playground.collecting? && active?
         super
-        if @outcome_is
-          begin
-            result = @outcome_is.call
-            outcome = result.id if Alternative === result && result.experiment == self
-          rescue 
-            warn "Error in AbTest#complete!: #{$!}"
+
+        unless outcome
+          if @outcome_is
+            begin
+              result = @outcome_is.call
+              outcome = result.id if Alternative === result && result.experiment == self
+            rescue
+              warn "Error in AbTest#complete!: #{$!}"
+            end
+          else
+            best = score.best
+            outcome = best.id if best
           end
-        else
-          best = score.best
-          outcome = best.id if best
         end
         # TODO: logging
         connection.ab_set_outcome @id, outcome || 0
       end
 
-      
+
       # -- Store/validate --
 
       def destroy
         connection.destroy_experiment @id
         super
+      end
+      
+      # clears all collected data for the experiment
+      def reset
+        connection.destroy_experiment @id
+        connection.set_experiment_created_at @id, Time.now
+        @outcome = @completed_at = nil
+        self
       end
 
       def save
@@ -438,10 +468,11 @@ module Vanity
         end
       end
 
-      # Called when tracking associated metric.
+      # Called via a hook by the associated metric.
       def track!(metric_id, timestamp, count, *args)
         return unless active?
         identity = identity() rescue nil
+        identity ||= args.last[:identity] if args.last.is_a?(Hash) && args.last[:identity]
         if identity
           return if connection.ab_showing(@id, identity)
           index = alternative_for(identity)
@@ -478,7 +509,53 @@ module Vanity
       # identity, and randomly distributed alternatives for each identity (in the
       # same experiment).
       def alternative_for(identity)
-        Digest::MD5.hexdigest("#{name}/#{identity}").to_i(17) % @alternatives.size
+        if @use_probabilities
+          existing_assignment = connection.ab_assigned @id, identity
+          return existing_assignment if existing_assignment
+          random_outcome = rand()
+          @use_probabilities.each do |alternative, max_prob|
+            return alternative.id if random_outcome < max_prob
+          end
+        end
+        return Digest::MD5.hexdigest("#{name}/#{identity}").to_i(17) % @alternatives.size
+      end
+
+      # Saves the assignment of an alternative to a person and performs the
+      # necessary housekeeping. Ignores repeat identities and filters using
+      # Playground#request_filter.
+      def save_assignment_if_valid_visitor(identity, index, request)
+        return if index == connection.ab_showing(@id, identity) || filter_visitor?(request)
+
+        call_on_assignment_if_available(identity, index)
+        rebalance_if_necessary!
+
+        connection.ab_add_participant(@id, index, identity)
+        check_completion!
+      end
+
+      def filter_visitor?(request)
+        @playground.request_filter.call(request)
+      end
+
+      def call_on_assignment_if_available(identity, index)
+        # if we have an on_assignment block, call it on new assignments
+        if @on_assignment_block
+          assignment = alternatives[index]
+          if !connection.ab_seen @id, identity, assignment
+            @on_assignment_block.call(Vanity.context, identity, assignment, self)
+          end
+        end
+      end
+
+      def rebalance_if_necessary!
+        # if we are rebalancing probabilities, keep track of how long it has been since we last rebalanced
+        if @rebalance_frequency
+          @assignments_since_rebalancing += 1
+          if @assignments_since_rebalancing >= @rebalance_frequency
+            @assignments_since_rebalancing = 0
+            rebalance!
+          end
+        end
       end
 
       begin
@@ -494,7 +571,7 @@ module Vanity
 
 
     module Definition
-      # Define an A/B test with the given name.  For example:
+      # Define an A/B test with the given name. For example:
       #   ab_test "New Banner" do
       #     alternatives :red, :green, :blue
       #   end

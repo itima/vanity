@@ -3,7 +3,7 @@ module Vanity
 
     AGGREGATES = [:average, :minimum, :maximum, :sum]
 
-    # Use an ActiveRecord model to get metric data from database table.  Also
+    # Use an ActiveRecord model to get metric data from database table. Also
     # forwards +after_create+ callbacks to hooks (updating experiments).
     #
     # Supported options:
@@ -35,18 +35,25 @@ module Vanity
     # @since 1.2.0
     # @see Vanity::Metric::ActiveRecord
     def model(class_or_scope, options = nil)
-      options = options || {}
-      conditions = options.delete(:conditions)
-      @ar_scoped = conditions ? class_or_scope.scoped(:conditions=>conditions) : class_or_scope
-      @ar_aggregate = AGGREGATES.find { |key| options.has_key?(key) }
-      @ar_column = options.delete(@ar_aggregate)
-      fail "Cannot use multiple aggregates in a single metric" if AGGREGATES.find { |key| options.has_key?(key) }
-      @ar_timestamp = options.delete(:timestamp) || :created_at
-      @ar_timestamp, @ar_timestamp_table = @ar_timestamp.to_s.split('.').reverse
-      @ar_timestamp_table ||= @ar_scoped.table_name
-      fail "Unrecognized options: #{options.keys * ", "}" unless options.empty?
-      @ar_scoped.after_create self
-      extend ActiveRecord
+      ActiveSupport.on_load(:active_record, :yield=>true) do
+        class_or_scope = class_or_scope.constantize if class_or_scope.is_a?(String)
+        options = options || {}
+        conditions = options.delete(:conditions)
+
+        @ar_scoped = conditions ? class_or_scope.where(conditions) : class_or_scope
+        @ar_aggregate = AGGREGATES.find { |key| options.has_key?(key) }
+        @ar_column = options.delete(@ar_aggregate)
+        fail "Cannot use multiple aggregates in a single metric" if AGGREGATES.find { |key| options.has_key?(key) }
+
+        @ar_timestamp = options.delete(:timestamp) || :created_at
+        @ar_timestamp, @ar_timestamp_table = @ar_timestamp.to_s.split('.').reverse
+        @ar_timestamp_table ||= @ar_scoped.table_name
+
+        fail "Unrecognized options: #{options.keys * ", "}" unless options.empty?
+
+        @ar_scoped.after_create(self)
+        extend ActiveRecord
+      end
     end
 
     # Calling model method on a metric extends it with these modules, redefining
@@ -57,16 +64,21 @@ module Vanity
 
       # This values method queries the database.
       def values(sdate, edate)
-        begin
-          time = Time.now.in_time_zone
-          difference = time.to_date - Date.today
-          sdate = sdate + difference
-          edate = edate + difference
-        rescue NoMethodError #In Rails 2.3, if no time zone has been set this fails
+        time = Time.now.in_time_zone
+        difference = time.to_date - Date.today
+        sdate = sdate + difference
+        edate = edate + difference
+
+        grouped = @ar_scoped
+            .where(@ar_timestamp_table => { @ar_timestamp => (sdate.to_time...(edate + 1).to_time) })
+            .group("date(#{@ar_scoped.quoted_table_name}.#{@ar_scoped.connection.quote_column_name(@ar_timestamp)})")
+
+        if @ar_column
+          grouped = grouped.send(@ar_aggregate, @ar_column)
+        else
+          grouped = grouped.count
         end
-        query = { :conditions=> { @ar_timestamp_table => { @ar_timestamp => (sdate.to_time...(edate + 1).to_time) } },
-                  :group=>"date(#{@ar_scoped.quoted_table_name}.#{@ar_scoped.connection.quote_column_name @ar_timestamp})" }
-        grouped = @ar_column ? @ar_scoped.send(@ar_aggregate, @ar_column, query) : @ar_scoped.count(query)
+
         grouped = Hash[grouped.map {|k,v| [k.to_date, v] }]
         (sdate..edate).inject([]) { |ordered, date| ordered << (grouped[date] || 0) }
       end
@@ -78,7 +90,8 @@ module Vanity
       end
 
       def last_update_at
-        record = @ar_scoped.find(:first, :order=>"#@ar_timestamp DESC", :limit=>1, :select=>@ar_timestamp)
+        # SELECT created_at FROM "skies" ORDER BY created_at DESC LIMIT 1
+        record = @ar_scoped.order("#{@ar_timestamp} DESC").select(@ar_timestamp).first
         record && record.send(@ar_timestamp)
       end
 
@@ -86,7 +99,7 @@ module Vanity
       def after_create(record)
         return unless @playground.collecting?
         count = @ar_column ? (record.send(@ar_column) || 0) : 1
-        call_hooks record.send(@ar_timestamp), nil, [count] if count > 0 && @ar_scoped.exists?(record)
+        call_hooks record.send(@ar_timestamp), nil, [count] if count > 0 && @ar_scoped.exists?(record.id)
       end
     end
   end

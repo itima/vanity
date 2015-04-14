@@ -1,30 +1,5 @@
 require "rake/testtask"
-require 'appraisal'
-
-# -- Building stuff --
-
-spec = Gem::Specification.load(Dir["*.gemspec"].first)
-
-desc "Build the Gem"
-task :build do
-  sh "gem build #{spec.name}.gemspec"
-end
-
-desc "Install #{spec.name} locally"
-task :install=>:build do
-  sudo = "sudo" unless File.writable?( Gem::ConfigMap[:bindir])
-  sh "#{sudo} gem install #{spec.name}-#{spec.version}.gem"
-end
-
-desc "Push new release to gemcutter and git tag"
-task :push=>["test:all", "build"] do
-  sh "git push"
-  puts "Tagging version #{spec.version} .."
-  sh "git tag v#{spec.version}"
-  sh "git push --tag"
-  puts "Building and pushing gem .."
-  sh "gem push #{spec.name}-#{spec.version}.gem"
-end
+require "bundler/gem_tasks"
 
 
 # -- Testing stuff --
@@ -33,7 +8,7 @@ desc "Test everything"
 task "test:all"=>"test:adapters"
 
 # Ruby versions we're testing with.
-RUBIES = %w{1.8.7 1.9.2}
+RUBIES = %w{1.9.3 2.0.0}
 
 # Use rake test:rubies to run all combination of tests (see test:adapters) using
 # all the versions of Ruby specified in RUBIES. Or to test a specific version of
@@ -71,71 +46,51 @@ task "test:setup" do
 end
 
 # These are all the adapters we're going to test with.
-ADAPTERS = %w{redis mongodb mysql}
+ADAPTERS = %w{redis mongodb active_record}
 
 desc "Test using different back-ends"
 task "test:adapters", :adapter do |t, args|
-  adapters = args.adapter ? [args.adapter] : ADAPTERS
-  adapters.each do |adapter|
-    puts "** Testing #{adapter} adapter"
-    sh "rake appraisal test DB=#{adapter} #{'--trace' if Rake.application.options.trace}"
+  begin # Make sure we have appraisal installed and available
+    require "appraisal"
+
+    adapters = args.adapter ? [args.adapter] : ADAPTERS
+    adapters.each do |adapter|
+      puts "** Testing #{adapter} adapter"
+      sh "bundle exec appraisal rake test DB=#{adapter} #{'--trace' if Rake.application.options.trace}"
+    end
+  rescue LoadError
+    warn "The appraisal gem must be available"
   end
 end
 
 # Run the test suit.
+Rake::TestTask.new(:test) do |task|
+  task.libs << "lib"
+  task.libs << "test"
+  task.pattern = "test/**/*_test.rb"
+  task.verbose = false
+end
 
 task :default=>:test
 desc "Run all tests"
-Rake::TestTask.new do |task|
-  task.test_files = FileList['test/**/*_test.rb']
-  if Rake.application.options.trace
-    #task.warning = true
-    task.verbose = true
-  elsif Rake.application.options.silent
-    task.ruby_opts << "-W0"
-  else
-    task.verbose = true
-  end
-    task.ruby_opts << "-I."
-end
 
 task(:clobber) { rm_rf "tmp" }
 
 
-# -- Documenting stuff --
-
-begin
-  require "yard"
-  YARD::Rake::YardocTask.new(:yardoc) do |task|
-    task.files  = FileList["lib/**/*.rb"].exclude("lib/vanity/backport.rb")
-    task.options = "--output", "html/api", "--title", "Vanity #{spec.version}", "--main", "README.rdoc", "--files", "CHANGELOG"
-  end
-rescue LoadError
-end
+# -- Documenting stuff -- #TODO make sure works under 1.9/2.0
 
 desc "Jekyll generates the main documentation (sans API)"
 task(:jekyll) { sh "jekyll", "doc", "html" }
-file "html/vanity.pdf"=>:jekyll do |t|
-  pages = %w{index metrics ab_testing rails email identity configuring contributing}.map{ |p| "html/#{p}.html" }
-  args = %w{--disable-javascript --outline --title Vanity --header-html doc/_layouts/_header.html --print-media-type}
-  args.concat %w{--margin-left 20 --margin-right 20 --margin-top 20 --margin-bottom 20 --header-spacing 5}
-  args.concat pages << t.name
-  sh "wkhtmltopdf", *args
-end
 
-file "html/vanity-api.zip"=>:yardoc do |t|
-  Dir.chdir "html" do
-    sh "zip vanity-api.zip -r api"
-  end
-end
-desc "Create documentation in docs directory (including API)"
-task :docs=>[:jekyll, :yardoc, "html/vanity-api.zip", "html/vanity.pdf"]
+desc "Create documentation in docs directory"
+task :docs=>[:jekyll]
+
 desc "Remove temporary files and directories"
-task(:clobber) { rm_rf "html" ; rm_rf ".yardoc" }
+task(:clobber) { rm_rf "html" }
 
-desc "Publish documentation to vanity.labnotes.org"
+desc "Publish documentation to vanity.labnotes.org via Github Pages on gh-pages git branch"
 task :publish=>[:clobber, :docs] do
-  sh "rsync -cr --del --progress html/ labnotes.org:/var/www/vanity/"
+  # TODO
 end
 
 
@@ -150,10 +105,10 @@ task :report do
   Vanity.playground.metrics.values.each(&:destroy!)
   Vanity.playground.reload!
 
-  # Control	182	35	19.23%	N/A
-  # Treatment A	180	45	25.00%	1.33
-  # Treatment B	189	28	14.81%	-1.13
-  # Treatment C	188	61	32.45%	2.94
+  # Control 182 35  19.23%  N/A
+  # Treatment A 180 45  25.00%  1.33
+  # Treatment B 189 28  14.81%  -1.13
+  # Treatment C 188 61  32.45%  2.94
   Vanity.playground.experiment(:null_abc).instance_eval do
     fake nil=>[182,35], :red=>[180,45], :green=>[189,28], :blue=>[188,61]
     @created_at = (Date.today - 40).to_time

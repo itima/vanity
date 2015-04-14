@@ -1,40 +1,11 @@
+require "vanity/experiment/definition"
+
 module Vanity
   module Experiment
-
-    # These methods are available from experiment definitions (files located in
-    # the experiments directory, automatically loaded by Vanity).  Use these
-    # methods to define you experiments, for example:
-    #   ab_test "New Banner" do
-    #     alternatives :red, :green, :blue
-    #     metrics :signup
-    #   end
-    module Definition
-
-      attr_reader :playground
-
-      # Defines a new experiment, given the experiment's name, type and
-      # definition block.
-      def define(name, type, options = nil, &block)
-        fail "Experiment #{@experiment_id} already defined in playground" if playground.experiments[@experiment_id]
-        klass = Experiment.const_get(type.to_s.gsub(/\/(.?)/) { "::#{$1.upcase}" }.gsub(/(?:^|_)(.)/) { $1.upcase })
-        experiment = klass.new(playground, @experiment_id, name, options)
-        experiment.instance_eval &block
-        experiment.save
-        playground.experiments[@experiment_id] = experiment
-      end
-
-      def new_binding(playground, id)
-        @playground, @experiment_id = playground, id
-        binding
-      end
-
-    end
-
     # Base class that all experiment types are derived from.
     class Base
 
       class << self
-        
         # Returns the type of this class as a symbol (e.g. AbTest becomes
         # ab_test).
         def type
@@ -69,6 +40,7 @@ module Vanity
         @id, @name = id.to_sym, name
         @options = options || {}
         @identify_block = method(:default_identify)
+        @on_assignment_block = nil
       end
 
       # Human readable experiment name (first argument you pass when creating a
@@ -94,8 +66,8 @@ module Vanity
       def type
         self.class.type
       end
-     
-      # Defines how we obtain an identity for the current experiment.  Usually
+
+      # Defines how we obtain an identity for the current experiment. Usually
       # Vanity gets the identity form a session object (see use_vanity), but
       # there are cases where you want a particular experiment to use a
       # different identity.
@@ -113,6 +85,19 @@ module Vanity
         @identify_block = block
       end
 
+      # Defines any additional actions to take when a new assignment is made for the current experiment
+      #
+      # For example, if you want to use the rails default logger to log whenever an assignment is made:
+      #   ab_test "Project widget" do
+      #     alternatives :small, :medium, :large
+      #     on_assignment do |controller, identity, assignment|
+      #       controller.logger.info "made a split test assignment for #{experiment.name}: #{identity} => #{assignment}"
+      #     end
+      #   end
+      def on_assignment(&block)
+        fail "Missing block" unless block
+        @on_assignment_block = block
+      end
 
       # -- Reporting --
 
@@ -126,11 +111,11 @@ module Vanity
         @description = text if text
         @description
       end
- 
+
 
       # -- Experiment completion --
 
-      # Define experiment completion condition.  For example:
+      # Define experiment completion condition. For example:
       #   complete_if do
       #     !score(95).chosen.nil?
       #   end
@@ -141,7 +126,9 @@ module Vanity
       end
 
       # Force experiment to complete.
-      def complete!
+      # @param optional integer id of the alternative that is the decided
+      # outcome of the experiment
+      def complete!(outcome = nil)
         @playground.logger.info "vanity: completed experiment #{id}"
         return unless @playground.collecting?
         connection.set_experiment_completed_at @id, Time.now
@@ -152,7 +139,7 @@ module Vanity
       def completed_at
         @completed_at ||= connection.get_experiment_completed_at(@id)
       end
-      
+
       # Returns true if experiment active, false if completed.
       def active?
         !@playground.collecting? || !connection.is_experiment_completed?(@id)
@@ -180,7 +167,7 @@ module Vanity
 
       def default_identify(context)
         raise "No Vanity.context" unless context
-        raise "Vanity.context does not respond to vanity_identity" unless context.respond_to?(:vanity_identity)
+        raise "Vanity.context does not respond to vanity_identity" unless context.respond_to?(:vanity_identity, true)
         context.send(:vanity_identity) or raise "Vanity.context.vanity_identity - no identity"
       end
 
@@ -195,9 +182,9 @@ module Vanity
           end
         end
       end
-      
+
       # Returns key for this experiment, or with an argument, return a key
-      # using the experiment as the namespace.  Examples:
+      # using the experiment as the namespace. Examples:
       #   key => "vanity:experiments:green_button"
       #   key("participants") => "vanity:experiments:green_button:participants"
       def key(name = nil)
@@ -208,11 +195,11 @@ module Vanity
       def connection
         @playground.connection
       end
-      
+
     end
   end
 
   class NoExperimentError < NameError
   end
-  
+
 end

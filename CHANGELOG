@@ -1,3 +1,47 @@
+== 1.9.0 (2014-04-20)
+
+Include db:reset in blacklist for autoconnect. (@phillbaker)
+Add grace period to Vanity::Metric updated_at (@stangel)
+Add timestamps to vanity_participants (@inkredabull)
+Use sqlite3 for all active record adapter tests & updates to test tasks (@phillbaker)
+Fix ActiveRecord participant retrieval with non-primitive identities. (@phillbaker)
+Replace instance variables with locals to fix CLI. (@phillbaker)
+Replace js encoding with server-side call. (@phillbaker)
+
+== 1.9.0 (2014-01-18)
+
+Change order of preference for vanity identity, from highest to lowest: URL param, cookie, method call, assignment. (@phillbaker)
+Add Playground#request_filter for AbTest#choose(s) (@phillbaker)
+Call on_assignment and perform rebalance when using js (@tmandry)
+Add Adapter#experiment_persisted? and check before showing Dashboard. (@phillbaker)
+Show info message at top of report if not collection (@hellochar)
+Add gracefull failover when redis is down/unreachable. (@phillbaker)
+Update README and documentation for clarity. (@nextmat)
+Remove hard Redis gem dependency from gemspec. (@phillbaker)
+Update appraisal to v1.0.0. (@phillbaker)
+
+== 1.8.3 (2013-11-20)
+
+Add support for Rails 4. (@phillbaker)
+Update redis gem depedendencies. (@phillbaker)
+Add Bayesian multi-armed bandit scoring for experiments as an alternative to the standard A/B calculations, as well as periodic alternative rebalancing based on alternative performance (@lotze).
+Add 'complete' UI functionality to the dashboard to complete an experiment from the rails web interface (@lotze).
+Gem maintenance: license specification to gemspec, remove .rvmrc file (@phillbaker).
+Add #ab_assigned to adapters: to get an array of the experiments a specific identity is assigned to, as well as a controller action to display those assignments (@lotze).
+
+== 1.8.2 (2013-10-27)
+
+Optimize metric_values query (@zawaideh).
+Add an on_assignment hook for experiments which is called when an identity is given an assignment in ab_test (@lotze)
+Finish Ruby 2.0 compatiblity with testing setup and add ActionMailer test coverage (@phillbaker).
+
+== 1.8.1 (2013-10-05)
+
+Added vanity_experiments helper for rails to return read only copy of active experiments (@iceberg901).
+Fixed support for Mass Assignment on Rails 3.2 (@hcarver).
+Fixed commandline usage (@phillbaker).
+
+
 == 1.8.0 (2012-03-12)
 
 Improved support for Rails 3.1 and Rails 3.2. Thanks to masverba, Daan and IsaacLewis.
@@ -10,12 +54,12 @@ Finer Grained Exceptions for Missing Experiments (Nick Barnwell)
 Minor change in locating config file (Ariel Salomon)
 
 Allow for table names in specified :timestamps (Peter Kovacs)
-    
+
 When a named scope includes a join, created_at can be ambiguous.  Use
 
-	metric "Sky is limit" do
-		model Sky, :timestamp => 'skies.created_at'
-	end
+  metric "Sky is limit" do
+    model Sky, :timestamp => 'skies.created_at'
+  end
 
 to disambiguate.
 
@@ -35,12 +79,12 @@ connections are deprecated in favor of using the connection option with a URI
 
 1.7.0 adds support for ActionMailer, for example:
 
-	class UserMailer < ActionMailer::Base 
-		def invite_email(user)
-			use_vanity_mailer user
-			mail :to => user.email, :subject => ab_test(:invite_subject)
-		end
-	end
+  class UserMailer < ActionMailer::Base
+    def invite_email(user)
+      use_vanity_mailer user
+      mail :to => user.email, :subject => ab_test(:invite_subject)
+    end
+  end
 
 See the documentation for more details.
 
@@ -225,7 +269,7 @@ To view Google Analytics metrics from within Vanity, first make sure you are
 using Garb.  For example, in your Gemfile:
 
   gem "vanity", "1.3.0"
-  gem "garb",   "0.5.0" 
+  gem "garb",   "0.5.0"
 
 Next, authenticate using your account credentials.  For example, in your
 config/environments/production.rb:
@@ -317,7 +361,7 @@ Much thanks to Ian Sefferman for fixing issues with Ruby 1.8.7 and Rails support
 * Added: Metrics.
 * Added: Use Vanity.playground.mock! when running tests and you'd rather not access a live Redis server.
 * Changed: A/B tests now using metrics for tracking.
-* Changed: Now throwing NameError instead of LoadError when failing to load experiment/metric.  NameError can be rescued on same line. 
+* Changed: Now throwing NameError instead of LoadError when failing to load experiment/metric.  NameError can be rescued on same line.
 * Changed: New, easier URL mapping for Dashboard: map.vanity "/vanity", :controller=>:vanity.
 * Changed: All tests are green on Ruby 1.8.6, 1.8.7 and 1.9.1.
 * Changed: Switched to redis-rb from http://github.com/ezmobius/redis-rb.

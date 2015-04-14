@@ -1,4 +1,4 @@
-require "test/test_helper"
+require "test_helper"
 
 class AbTestController < ActionController::Base
   use_vanity :current_user
@@ -13,11 +13,7 @@ class AbTestController < ActionController::Base
   end
 
   def test_capture
-    if Rails.version.to_i == 3
-      render :inline=>"<%= ab_test :simple do |value| %><%= value %><% end %>"
-    else
-      render :inline=>"<% ab_test :simple do |value| %><%= value %><% end %>"
-    end
+    render :inline=>"<%= ab_test :simple do |value| %><%= value %><% end %>"
   end
 
   def track
@@ -53,7 +49,7 @@ class AbTestTest < ActionController::TestCase
       metrics :coolness
     end
   end
-  
+
   def test_returning_alternative_by_value
     new_ab_test :abcd do
       alternatives :a, :b, :c, :d
@@ -124,7 +120,7 @@ class AbTestTest < ActionController::TestCase
 
   # -- use_js! --
 
-  def test_does_not_record_participant_when_using_js
+  def test_choose_does_not_record_participant_when_using_js
     Vanity.playground.use_js!
     ids = (0...10).to_a
     new_ab_test :foobar do
@@ -137,6 +133,184 @@ class AbTestTest < ActionController::TestCase
     assert_equal 0, alts.map(&:participants).sum
   end
 
+  # -- on_assignment --
+
+  def test_calls_on_assignment_on_new_assignment
+    on_assignment_called_times = 0
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "6e98ec" }
+      metrics :coolness
+      on_assignment { on_assignment_called_times = on_assignment_called_times+1 }
+    end
+    2.times { experiment(:foobar).choose }
+    assert_equal 1, on_assignment_called_times
+  end
+
+  def test_calls_on_assignment_when_given_valid_request
+    on_assignment_called_times = 0
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "6e98ec" }
+      metrics :coolness
+      on_assignment { on_assignment_called_times = on_assignment_called_times+1 }
+    end
+    experiment(:foobar).choose(dummy_request)
+    assert_equal 1, on_assignment_called_times
+  end
+
+  def test_does_not_call_on_assignment_when_given_invalid_request
+    on_assignment_called_times = 0
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "6e98ec" }
+      metrics :coolness
+      on_assignment { on_assignment_called_times = on_assignment_called_times+1 }
+    end
+    request = dummy_request
+    request.user_agent = "Googlebot/2.1 ( http://www.google.com/bot.html)"
+    experiment(:foobar).choose(request)
+    assert_equal 0, on_assignment_called_times
+  end
+
+  def test_calls_on_assignment_on_new_assignment_via_chooses
+    on_assignment_called_times = 0
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "6e98ec" }
+      metrics :coolness
+      on_assignment { on_assignment_called_times = on_assignment_called_times+1 }
+    end
+    2.times { experiment(:foobar).chooses("foo") }
+    assert_equal 1, on_assignment_called_times
+  end
+
+  def test_returns_the_same_alternative_consistently_when_on_assignment_is_set
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "6e98ec" }
+      on_assignment {}
+      metrics :coolness
+    end
+    assert value = experiment(:foobar).choose.value
+    assert_match /foo|bar/, value
+    1000.times do
+      assert_equal value, experiment(:foobar).choose.value
+    end
+  end
+
+  # -- ab_assigned --
+
+  def test_ab_assigned
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "6e98ec" }
+      metrics :coolness
+    end
+    assert_equal nil, experiment(:foobar).playground.connection.ab_assigned(experiment(:foobar).id, "6e98ec")
+    assert id = experiment(:foobar).choose.id
+    assert_equal id, experiment(:foobar).playground.connection.ab_assigned(experiment(:foobar).id, "6e98ec")
+  end
+
+  def test_ab_assigned
+    identity = { :a => :b }
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { identity }
+      metrics :coolness
+    end
+    assert_equal nil, experiment(:foobar).playground.connection.ab_assigned(experiment(:foobar).id, identity)
+    assert id = experiment(:foobar).choose.id
+    assert_equal id, experiment(:foobar).playground.connection.ab_assigned(experiment(:foobar).id, identity)
+  end
+
+  # -- Unequal probabilities --
+
+  def test_returns_the_same_alternative_consistently_when_using_probabilities
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "6e98ec" }
+      rebalance_frequency 10
+      metrics :coolness
+    end
+    value = experiment(:foobar).choose.value
+    assert value
+    assert_match /foo|bar/, value
+    100.times do
+      assert_equal value, experiment(:foobar).choose.value
+    end
+  end
+
+  def test_uses_probabilities_for_new_assignments
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { rand }
+      rebalance_frequency 10000
+      metrics :coolness
+    end
+    altered_alts = experiment(:foobar).alternatives
+    altered_alts[0].probability=30
+    altered_alts[1].probability=70
+    experiment(:foobar).set_alternative_probabilities altered_alts
+    alts = Array.new(600) { experiment(:foobar).choose.value }
+    assert_equal %w{bar foo}, alts.uniq.sort
+    assert_in_delta alts.select { |a| a == altered_alts[0].value }.size, 200, 60 # this may fail, such is propability
+  end
+
+  # -- Rebalancing probabilities --
+
+  def test_rebalances_probabilities_after_rebalance_frequency_calls
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { rand }
+      rebalance_frequency 12
+      metrics :coolness
+    end
+    class <<experiment(:foobar)
+      def times_called
+        @times_called || 0
+      end
+      def rebalance!
+        @times_called = times_called + 1
+      end
+    end
+    11.times { experiment(:foobar).choose.value }
+    assert_equal 0, experiment(:foobar).times_called
+    experiment(:foobar).choose.value
+    assert_equal 1, experiment(:foobar).times_called
+    12.times { experiment(:foobar).choose.value }
+    assert_equal 2, experiment(:foobar).times_called
+  end
+
+  def test_rebalance_uses_bayes_score_probabilities_to_update_probabilities
+    new_ab_test :foobar do
+      alternatives "foo", "bar", "baa"
+      identify { rand }
+      rebalance_frequency 12
+      metrics :coolness
+    end
+    corresponding_probabilities = [[experiment(:foobar).alternatives[0], 0.3], [experiment(:foobar).alternatives[1], 0.6], [experiment(:foobar).alternatives[2], 1.0]]
+
+    class <<experiment(:foobar)
+      def was_called
+        @was_called
+      end
+      def bayes_bandit_score(probability=90)
+        @was_called = true
+        altered_alts = Vanity.playground.experiment(:foobar).alternatives
+        altered_alts[0].probability=30
+        altered_alts[1].probability=30
+        altered_alts[2].probability=40
+        Struct.new(:alts,:method).new(altered_alts,:bayes_bandit_score)
+      end
+      def use_probabilities
+        @use_probabilities
+      end
+    end
+    experiment(:foobar).rebalance!
+    assert experiment(:foobar).was_called
+    assert_equal experiment(:foobar).use_probabilities, corresponding_probabilities
+  end
 
   # -- Running experiment --
 
@@ -208,6 +382,27 @@ class AbTestTest < ActionController::TestCase
     assert_equal 100, alts.map(&:converted).sum
   end
 
+  def test_choose_records_participants_given_a_valid_request
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "me" }
+      metrics :coolness
+    end
+    experiment(:foobar).choose(dummy_request)
+    assert_equal 1, experiment(:foobar).alternatives.map(&:participants).sum
+  end
+
+  def test_choose_ignores_participants_given_an_invalid_request
+    new_ab_test :foobar do
+      alternatives "foo", "bar"
+      identify { "me" }
+      metrics :coolness
+    end
+    request = dummy_request
+    request.user_agent = "Googlebot/2.1 ( http://www.google.com/bot.html)"
+    experiment(:foobar).choose(request)
+    assert_equal 0, experiment(:foobar).alternatives.map(&:participants).sum
+  end
 
   def test_destroy_experiment
     new_ab_test :simple do
@@ -288,7 +483,7 @@ class AbTestTest < ActionController::TestCase
 
 
   # -- Testing with tests --
-  
+
   def test_with_given_choice
     new_ab_test :simple do
       alternatives :a, :b, :c
@@ -329,17 +524,34 @@ class AbTestTest < ActionController::TestCase
 
 
   # -- Scoring --
-  
+
+  def test_calculate_score
+    new_ab_test :abcd do
+      alternatives :a, :b, :c, :d
+      metrics :coolness
+    end
+    score_result = experiment(:abcd).calculate_score
+    assert_equal :score, score_result.method
+
+    new_ab_test :bayes_abcd do
+      alternatives :a, :b, :c, :d
+      metrics :coolness
+      score_method :bayes_bandit_score
+    end
+    bayes_score_result = experiment(:bayes_abcd).calculate_score
+    assert_equal :bayes_bandit_score, bayes_score_result.method
+  end
+
   def test_scoring
     new_ab_test :abcd do
       alternatives :a, :b, :c, :d
       metrics :coolness
     end
     # participating, conversions, rate, z-score
-    # Control:      182	35 19.23%	N/A
-    # Treatment A:  180	45 25.00%	1.33
-    # treatment B:  189	28 14.81%	-1.13
-    # treatment C:  188	61 32.45%	2.94
+    # Control:      182 35 19.23% N/A
+    # Treatment A:  180 45 25.00% 1.33
+    # treatment B:  189 28 14.81% -1.13
+    # treatment C:  188 61 32.45% 2.94
     fake :abcd, :a=>[182, 35], :b=>[180, 45], :c=>[189,28], :d=>[188, 61]
 
     z_scores = experiment(:abcd).score.alts.map { |alt| "%.2f" % alt.z_score }
@@ -354,6 +566,23 @@ class AbTestTest < ActionController::TestCase
 
     assert_equal 1, experiment(:abcd).score.base.id
     assert_equal 2, experiment(:abcd).score.least.id
+  end
+
+  def test_bayes_scoring
+    new_ab_test :abcd do
+      alternatives :a, :b, :c, :d
+      metrics :coolness
+    end
+    # participating, conversions, rate, z-score
+    # Control:      182 35 19.23% N/A
+    # Treatment A:  180 45 25.00% 1.33
+    # treatment B:  189 28 14.81% -1.13
+    # treatment C:  188 61 32.45% 2.94
+    fake :abcd, :a=>[182, 35], :b=>[180, 45], :c=>[189,28], :d=>[188, 61]
+
+    score_result = experiment(:abcd).bayes_bandit_score
+    probabilities = score_result.alts.map{|a| a.probability.round}
+    assert_equal [0,0,6,94], probabilities
   end
 
   def test_scoring_with_no_performers
@@ -380,7 +609,7 @@ class AbTestTest < ActionController::TestCase
     assert experiment(:abcd).score.alts.all? { |alt| alt.difference.nil? }
     assert_equal 1, experiment(:abcd).score.best.id
     assert_nil experiment(:abcd).score.choice
-    assert_equal 2, experiment(:abcd).score.base.id
+    assert_includes [0,2,3], experiment(:abcd).score.base.id
     assert_equal 1, experiment(:abcd).score.least.id
   end
 
@@ -424,10 +653,10 @@ class AbTestTest < ActionController::TestCase
       metrics :coolness
     end
     # participating, conversions, rate, z-score
-    # Control:      182	35 19.23%	N/A
-    # Treatment A:  180	45 25.00%	1.33
-    # treatment B:  189	28 14.81%	-1.13
-    # treatment C:  188	61 32.45%	2.94
+    # Control:      182 35 19.23% N/A
+    # Treatment A:  180 45 25.00% 1.33
+    # treatment B:  189 28 14.81% -1.13
+    # treatment C:  188 61 32.45% 2.94
     fake :abcd, :a=>[182, 35], :b=>[180, 45], :c=>[189,28], :d=>[188, 61]
 
     assert_equal <<-TEXT, experiment(:abcd).conclusion.join("\n") << "\n"
@@ -601,13 +830,21 @@ This experiment did not run long enough to find a clear winner.
 
 
   # -- Outcome --
-  
+
   def test_completion_outcome
     new_ab_test :quick do
       outcome_is { alternatives[1] }
       metrics :coolness
     end
     experiment(:quick).complete!
+    assert_equal experiment(:quick).alternatives[1], experiment(:quick).outcome
+  end
+
+  def test_completion_with_outcome
+    new_ab_test :quick do
+      metrics :coolness
+    end
+    experiment(:quick).complete!(1)
     assert_equal experiment(:quick).alternatives[1], experiment(:quick).outcome
   end
 
@@ -742,6 +979,26 @@ This experiment did not run long enough to find a clear winner.
     assert_equal experiment(:simple).alternatives[2].participants, 1
   end
 
+  def test_chooses_records_participants_given_a_valid_request
+    new_ab_test :simple do
+      alternatives :a, :b, :c
+      metrics :coolness
+    end
+    experiment(:simple).chooses(:a, dummy_request)
+    assert_equal 1, experiment(:simple).alternatives[0].participants
+  end
+
+  def test_chooses_ignores_participants_given_an_invalid_request
+    new_ab_test :simple do
+      alternatives :a, :b, :c
+      metrics :coolness
+    end
+    request = dummy_request
+    request.user_agent = "Googlebot/2.1 ( http://www.google.com/bot.html)"
+    experiment(:simple).chooses(:a, request)
+    assert_equal 0, experiment(:simple).alternatives[0].participants
+  end
+
   def test_no_collection_and_chooses
     not_collecting!
     new_ab_test :simple do
@@ -763,6 +1020,27 @@ This experiment did not run long enough to find a clear winner.
     choice = experiment(:simple).choose.value
     assert [:a, :b, :c].include?(choice)
     assert_equal choice, experiment(:simple).choose.value
+  end
+  
+  def test_reset_clears_participants
+    new_ab_test :simple do
+      alternatives :a, :b, :c
+      metrics :coolness
+    end
+    experiment(:simple).chooses(:b)
+    assert_equal experiment(:simple).alternatives[1].participants, 1
+    experiment(:simple).reset
+    assert_equal experiment(:simple).alternatives[1].participants, 0
+  end
+  
+  def test_clears_outcome_and_completed_at
+    new_ab_test :simple do
+      alternatives :a, :b, :c
+      metrics :coolness
+    end
+    experiment(:simple).reset
+    assert_nil experiment(:simple).outcome
+    assert_nil experiment(:simple).completed_at
   end
 
 

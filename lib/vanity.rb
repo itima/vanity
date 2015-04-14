@@ -15,7 +15,6 @@ module Vanity
 end
 
 require "vanity/version"
-require "vanity/backport" if RUBY_VERSION < "1.9"
 # Metrics.
 require "vanity/metric/base"
 require "vanity/metric/active_record"
@@ -26,11 +25,11 @@ require "vanity/experiment/base"
 require "vanity/experiment/ab_test"
 # Database adapters
 require "vanity/adapters/abstract_adapter"
-require "vanity/adapters/redis_adapter"
-require "vanity/adapters/mongodb_adapter"
 require "vanity/adapters/mock_adapter"
 # Playground.
 require "vanity/playground"
+require "vanity/templates"
+require "vanity/autoconnect"
 require "vanity/helpers"
 # Integration with various frameworks.
 require "vanity/frameworks"
